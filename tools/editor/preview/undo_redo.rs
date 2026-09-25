@@ -4,16 +4,48 @@
 use super::ui;
 use core::hash::{Hash as _, Hasher as _};
 use i_slint_editor_preview::editing::text_edit;
-use i_slint_live_preview::protocol::PreviewToLspMessage;
 
 use std::collections::HashMap;
 
 type FileHashes = HashMap<lsp_types::Url, u64>;
 
+#[derive(Clone)]
 pub(super) struct EditItem {
     pub(super) title: String,
     pub(super) edit: lsp_types::WorkspaceEdit,
     pub(super) file_hashes: FileHashes,
+}
+
+pub(super) enum PendingHistory {
+    Commit {
+        title: String,
+        reverse_edit: Option<lsp_types::WorkspaceEdit>,
+        file_hashes: FileHashes,
+    },
+    Undo {
+        redo: EditItem,
+    },
+    Redo {
+        undo: EditItem,
+    },
+}
+
+impl PendingHistory {
+    pub(super) fn complete(self, stack: &mut UndoRedoStack) {
+        match self {
+            Self::Commit { title, reverse_edit, file_hashes } => {
+                stack.push(title, reverse_edit, file_hashes)
+            }
+            Self::Undo { redo } => {
+                stack.undo_stack.pop();
+                stack.redo_stack.push(redo);
+            }
+            Self::Redo { undo } => {
+                stack.redo_stack.pop();
+                stack.undo_stack.push(undo);
+            }
+        }
+    }
 }
 
 pub fn compute_file_hashes(
@@ -92,77 +124,47 @@ impl UndoRedoStack {
         }
         ok
     }
+
+    #[cfg(test)]
+    pub(super) fn lengths(&self) -> (usize, usize) {
+        (self.undo_stack.len(), self.redo_stack.len())
+    }
 }
 
 pub fn setup(api: &ui::Api<'_>) {
-    api.on_undo(|| {
-        let Some(document_cache) = super::document_cache() else { return };
-        super::PREVIEW_STATE.with_borrow_mut(|state| {
-            if edit_pending(state) {
-                state.pending_history.push_back(false);
-                return;
-            }
-            let Some(edit) = state.undo_redo_stack.undo_stack.pop() else {
-                return;
-            };
-            let Some((reverse, file_hashes)) = prepare_history_edit(&document_cache, &edit) else {
-                state.undo_redo_stack.clear();
-                set_undo_redo_enabled(state);
-                return;
-            };
-            state.undo_redo_stack.redo_stack.push(EditItem {
-                title: edit.title.clone(),
-                edit: reverse,
-                file_hashes,
-            });
-            state
-                .to_lsp
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .send(&PreviewToLspMessage::SendWorkspaceEdit {
-                    label: Some(format!("Undo \"{}\"", edit.title)),
-                    edit: edit.edit,
-                })
-                .unwrap();
+    api.on_undo(|| submit_history(false));
+    api.on_redo(|| submit_history(true));
+}
+
+fn submit_history(redo: bool) {
+    let Some(document_cache) = super::document_cache() else { return };
+    let prepared = super::PREVIEW_STATE.with_borrow_mut(|state| {
+        if edit_pending(state) {
+            state.pending_history.push_back(redo);
+            return None;
+        }
+        let edit = if redo {
+            state.undo_redo_stack.redo_stack.last()
+        } else {
+            state.undo_redo_stack.undo_stack.last()
+        }?
+        .clone();
+        let Some((reverse, file_hashes)) = prepare_history_edit(&document_cache, &edit) else {
+            state.undo_redo_stack.clear();
             set_undo_redo_enabled(state);
-            state.workspace_edit_sent = true;
-        })
+            return None;
+        };
+        let reverse = EditItem { title: edit.title.clone(), edit: reverse, file_hashes };
+        let label = format!("{} \"{}\"", if redo { "Redo" } else { "Undo" }, edit.title);
+        let pending = if redo {
+            PendingHistory::Redo { undo: reverse }
+        } else {
+            PendingHistory::Undo { redo: reverse }
+        };
+        Some((label, edit.edit, pending))
     });
-    api.on_redo(|| {
-        let Some(document_cache) = super::document_cache() else { return };
-        super::PREVIEW_STATE.with_borrow_mut(|state| {
-            if edit_pending(state) {
-                state.pending_history.push_back(true);
-                return;
-            }
-            let Some(edit) = state.undo_redo_stack.redo_stack.pop() else {
-                return;
-            };
-            let Some((reverse, file_hashes)) = prepare_history_edit(&document_cache, &edit) else {
-                state.undo_redo_stack.clear();
-                set_undo_redo_enabled(state);
-                return;
-            };
-            state.undo_redo_stack.undo_stack.push(EditItem {
-                title: edit.title.clone(),
-                edit: reverse,
-                file_hashes,
-            });
-            state
-                .to_lsp
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .send(&PreviewToLspMessage::SendWorkspaceEdit {
-                    label: Some(format!("Redo \"{}\"", edit.title)),
-                    edit: edit.edit,
-                })
-                .unwrap();
-            set_undo_redo_enabled(state);
-            state.workspace_edit_sent = true;
-        })
-    });
+    let Some((label, edit, pending)) = prepared else { return };
+    super::send_prepared_workspace_edit(label, edit, pending);
 }
 
 pub(super) fn edit_pending(state: &super::PreviewState) -> bool {

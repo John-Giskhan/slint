@@ -590,8 +590,8 @@ async fn handle_preview_message(
             tracing::debug!("Ignoring message from preview: {message:?}");
         }
         SendWorkspaceEdit { label, edit } => {
-            let applied = handle_workspace_edit(&session.document_cache, label.as_deref(), edit);
-            preview::workspace_edit_finished(edit.clone(), applied);
+            let result = handle_workspace_edit(&session.document_cache, label.as_deref(), edit);
+            preview::workspace_edit_finished(edit.clone(), result.applied, result.changed);
         }
     }
 }
@@ -689,40 +689,48 @@ fn canonical_preview_component(
     Some((PreviewComponent { url, component: component.component.clone() }, path))
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct WorkspaceEditApplication {
+    applied: bool,
+    changed: bool,
+}
+
 fn handle_workspace_edit(
     document_cache: &editor_preview::DocumentCache,
     label: Option<&str>,
     edit: &lsp_types::WorkspaceEdit,
-) -> bool {
+) -> WorkspaceEditApplication {
     match editor_preview::editing::text_edit::apply_workspace_edit(document_cache, edit) {
         Ok(edited_texts) => {
-            let mut applied = true;
+            let mut result = WorkspaceEditApplication { applied: true, changed: false };
             for editor_preview::editing::text_edit::EditedText { url, contents } in edited_texts {
                 match editor_preview::uri_to_file(&url) {
                     Some(path) => {
                         if let Err(err) = std::fs::write(&path, &contents) {
-                            applied = false;
+                            result.applied = false;
                             tracing::error!(
                                 "Failed to apply workspace edit '{}' to {}: {err}",
                                 label.unwrap_or("(unnamed)"),
                                 path.display()
                             );
+                        } else {
+                            result.changed = true;
                         }
                     }
                     None => {
-                        applied = false;
+                        result.applied = false;
                         tracing::warn!("Cannot apply workspace edit to non-file URL: {url}");
                     }
                 }
             }
-            applied
+            result
         }
         Err(err) => {
             tracing::error!(
                 "Failed to compute workspace edit '{}': {err}",
                 label.unwrap_or("(unnamed)")
             );
-            false
+            WorkspaceEditApplication::default()
         }
     }
 }

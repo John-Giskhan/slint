@@ -84,9 +84,10 @@ THRESHOLD_LABELS = (
 DISABLED_IDS = ("layout-rectangle", "rotated-rectangle")
 PALETTE_DROP_SIZES = {
     "Rectangle": (160, 64),
-    "Text": (25, 15),
+    "Text": (220, 40),
     "Image": (160, 96),
 }
+NATURAL_TEXT_DROP_SIZE = (25, 15)
 
 
 def finish_palette_drag(
@@ -157,7 +158,9 @@ def test_component_palette_drop_can_extend_outside_artboard(
             y=artboard.absolute_position.y + 8,
         )
         begin_palette_drag(window, kind, target)
-        expected_width, expected_height = PALETTE_DROP_SIZES[kind]
+        expected_width, expected_height = (
+            NATURAL_TEXT_DROP_SIZE if kind == "Text" else PALETTE_DROP_SIZES[kind]
+        )
 
         expected_x = round(target.x - artboard.absolute_position.x - expected_width / 2)
         expected_y = round(

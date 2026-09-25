@@ -370,7 +370,7 @@ pub(super) fn commit_fill(key: SharedString, name: SharedString, value: ui::Fill
         cancel();
         return false;
     };
-    let accepted = submit_workspace_edit("Editing fill".into(), edit, true, Some(value));
+    let accepted = submit_workspace_edit("Editing fill".into(), edit, true, Some(value), None);
     if !accepted {
         cancel();
     }
